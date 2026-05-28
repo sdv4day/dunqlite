@@ -1,0 +1,23 @@
+{
+    "name": "dunqlite",
+    "configurations": [
+        {
+            "name": "demo1",
+            "targetType": "executable",
+            "targetName": "app",
+            "mainSourceFile": "source/app.d"
+        },
+        {
+            "name": "demo-generic",
+            "targetType": "executable",
+            "targetName": "app_generic",
+            "mainSourceFile": "source/app_generic.d"
+        },
+        {
+            "name": "benchmark",
+            "targetType": "executable",
+            "targetName": "benchmark",
+            "mainSourceFile": "source/benchmark.d"
+        }
+    ]
+}
