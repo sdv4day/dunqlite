@@ -2,6 +2,7 @@
  * 文件存储实现
  * 
  * 基于文件系统的键值存储，支持持久化
+ * 使用 WAL (Write-Ahead Logging) 提供崩溃恢复保护
  */
 module dunqlite.oop.file_storage;
 
@@ -11,10 +12,12 @@ import dunqlite.oop.types;
 import dunqlite.oop.cursor;
 import dunqlite.oop.storage;
 import dunqlite.oop.memory_storage;
+import dunqlite.oop.wal;
 
 import core.sync.mutex;
 import std.stdio : File;
 import std.conv : text;
+import std.file : exists, remove, rename;
 
 /**
  * 文件格式定义
@@ -49,11 +52,14 @@ struct RecordHeader {
  * FileStorage - 文件存储
  * 
  * 启动时从文件加载记录到内存哈希表，关闭时写回文件
+ * 使用 WAL 提供崩溃恢复保护
  */
 class FileStorage : Storage {
     private MemoryStorage memStorage_;
     private Mutex lock_;
     private string filePath_;
+    private Wal wal_;
+    private string tempPath_; // 临时文件路径，用于原子写入
     
     /**
      * 构造函数
@@ -66,17 +72,28 @@ class FileStorage : Storage {
         super(alloc);
         lock_ = new Mutex();
         
-        // 先初始化 memStorage_，再加锁
-        memStorage_ = new MemoryStorage(allocator_);
-        
         filePath_ = filePath;
+        tempPath_ = filePath ~ ".tmp";
+        
+        // 初始化 WAL
+        wal_ = new Wal(filePath_);
+        
+        // 先初始化 memStorage_
+        memStorage_ = new MemoryStorage(allocator_);
         
         // 从文件加载记录
         loadFromFile();
+        
+        // 重放 WAL 日志（崩溃恢复）
+        replayWal();
+        
+        // 打开 WAL 用于后续写入
+        wal_.open();
     }
     
     ~this() {
         // 析构函数不调用close()，避免循环调用
+        wal_.close();
         destroy(lock_);
     }
     
@@ -158,16 +175,56 @@ class FileStorage : Storage {
     }
     
     /**
-     * 保存记录到文件
+     * 重放 WAL 日志（崩溃恢复）
+     */
+    private void replayWal() {
+        import std.stdio : writefln;
+        
+        if (!wal_.exists()) return;
+        
+        writefln("[FileStorage] 重放 WAL 日志...");
+        
+        wal_.replay(
+            // onPut 回调
+            (const(void)* key, uint keyLen, const(void)* value, uint valLen) {
+                int rc = memStorage_.put(key, cast(int)keyLen, value, cast(long)valLen);
+                return rc == ErrorCode.OK;
+            },
+            // onRemove 回调
+            (const(void)* key, uint keyLen) {
+                int rc = memStorage_.remove(key, cast(int)keyLen);
+                return rc == ErrorCode.OK;
+            }
+        );
+        
+        writefln("[FileStorage] WAL 重放完成");
+    }
+    
+    /**
+     * 保存记录到文件（原子写入）
      */
     private int saveToFile() {
         import std.stdio : writefln;
         
+        int writeResult = writeTempFile();
+        if (writeResult != ErrorCode.OK) {
+            return writeResult;
+        }
+        
+        return atomicRename();
+    }
+    
+    /**
+     * 写入临时文件
+     */
+    private int writeTempFile() {
+        import std.stdio : writefln;
+        
         File f;
         try {
-            f = File(filePath_, "wb");
+            f = File(tempPath_, "wb");
         } catch (Exception e) {
-            writefln("[FileStorage] 创建文件失败: %s", e.msg);
+            writefln("[FileStorage] 创建临时文件失败: %s", e.msg);
             return ErrorCode.IO_ERROR;
         }
         
@@ -178,12 +235,10 @@ class FileStorage : Storage {
         
         writefln("[FileStorage] 开始写入 %d 条记录", memStorage_.count());
         
-        // 写入文件头
         FileHeader header;
         header.recordCount = memStorage_.count();
         f.rawWrite((cast(ubyte*)&header)[0 .. FileHeader.sizeof]);
         
-        // 遍历所有记录写入文件
         auto cursor = memStorage_.createCursor();
         scope(exit) {
             cursor.reset();
@@ -203,6 +258,36 @@ class FileStorage : Storage {
         }
         
         writefln("[FileStorage] 写入 %d 条记录完成", written);
+        return ErrorCode.OK;
+    }
+    
+    /**
+     * 原子重命名临时文件
+     */
+    private int atomicRename() {
+        import std.stdio : writefln;
+        
+        version (Windows) {
+            import core.sys.windows.windows : MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH;
+            import std.conv : to;
+            
+            auto wSrc = tempPath_.to!wstring();
+            auto wDst = filePath_.to!wstring();
+            if (!MoveFileExW(wSrc.ptr, wDst.ptr, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                writefln("[FileStorage] 原子写入失败 (MoveFileExW)");
+                return ErrorCode.IO_ERROR;
+            }
+        } else {
+            try {
+                if (exists(filePath_)) {
+                    .remove(filePath_);
+                }
+                .rename(tempPath_, filePath_);
+            } catch (Exception e) {
+                writefln("[FileStorage] 原子写入失败: %s", e.msg);
+                return ErrorCode.IO_ERROR;
+            }
+        }
         
         return ErrorCode.OK;
     }
@@ -210,6 +295,10 @@ class FileStorage : Storage {
     override int put(const(void)* key, int keyLen, const(void)* value, long valueLen) {
         lock_.lock();
         scope(exit) lock_.unlock();
+        
+        if (!wal_.logPut(key, cast(uint)keyLen, value, cast(uint)valueLen)) {
+            return ErrorCode.IO_ERROR;
+        }
         
         return memStorage_.put(key, keyLen, value, valueLen);
     }
@@ -224,6 +313,10 @@ class FileStorage : Storage {
     override int remove(const(void)* key, int keyLen) {
         lock_.lock();
         scope(exit) lock_.unlock();
+        
+        if (!wal_.logRemove(key, cast(uint)keyLen)) {
+            return ErrorCode.IO_ERROR;
+        }
         
         return memStorage_.remove(key, keyLen);
     }
@@ -266,7 +359,11 @@ class FileStorage : Storage {
         lock_.lock();
         scope(exit) lock_.unlock();
         
-        return saveToFile();
+        int rc = saveToFile();
+        if (rc == ErrorCode.OK) {
+            wal_.checkpoint();
+        }
+        return rc;
     }
     
     /**
@@ -281,6 +378,7 @@ class FileStorage : Storage {
         
         int rc = saveToFile();
         if (rc == ErrorCode.OK) {
+            wal_.checkpoint();
             memStorage_.clear();
         }
         return rc;
