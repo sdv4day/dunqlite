@@ -11,7 +11,6 @@ module dunqlite.oop.allocator;
 
 import std.experimental.allocator;
 import std.experimental.allocator.mallocator;
-import core.sync.mutex;
 
 /**
  * Allocator - 内存分配器抽象基类
@@ -81,7 +80,8 @@ abstract class Allocator {
         auto newMem = allocate(newSize);
         if (newMem.length == 0) return null;
         if (oldMem.length > 0) {
-            copyMemory(oldMem[0..newSize], newMem);
+            auto copyLen = oldMem.length < newSize ? oldMem.length : newSize;
+            copyMemory(oldMem[0..copyLen], newMem[0..copyLen]);
             deallocate(oldMem);
         }
         return newMem;
@@ -112,7 +112,6 @@ abstract class Allocator {
  */
 final class GlobalAllocator : Allocator {
     private static shared GlobalAllocator instance_;
-    private static shared Mutex instanceLock_;
     
     /**
      * 获取全局实例（线程安全）
@@ -124,9 +123,7 @@ final class GlobalAllocator : Allocator {
         if (instance_ is null) {
             synchronized {
                 if (instance_ is null) {
-                    auto lock = new Mutex();
                     auto alloc = new GlobalAllocator();
-                    instanceLock_ = cast(shared) lock;
                     instance_ = cast(shared) alloc;
                 }
             }
@@ -149,5 +146,75 @@ final class GlobalAllocator : Allocator {
     
     override void deallocate(void[] memory) {
         Mallocator.instance.deallocate(memory);
+    }
+}
+
+unittest {
+    import std.stdio;
+
+    writeln("[unittest] GlobalAllocator.instance 单例");
+    {
+        auto a1 = GlobalAllocator.instance();
+        auto a2 = GlobalAllocator.instance();
+        assert(a1 !is null);
+        assert(a1 is a2);
+    }
+
+    writeln("[unittest] GlobalAllocator.allocate/deallocate");
+    {
+        auto alloc = GlobalAllocator.instance();
+        auto mem = alloc.allocate(1024);
+        assert(mem.length == 1024);
+        (cast(ubyte[])mem)[0] = 0xAB;
+        assert((cast(ubyte[])mem)[0] == 0xAB);
+        alloc.deallocate(mem);
+    }
+
+    writeln("[unittest] GlobalAllocator.allocateZero");
+    {
+        auto alloc = GlobalAllocator.instance();
+        auto mem = alloc.allocateZero(10, 4);
+        assert(mem.length == 40);
+        auto bytes = cast(ubyte[])mem;
+        foreach (b; bytes) {
+            assert(b == 0);
+        }
+        alloc.deallocate(mem);
+    }
+
+    writeln("[unittest] Allocator.duplicate");
+    {
+        auto alloc = GlobalAllocator.instance();
+        auto src = cast(const(void)[])"hello";
+        auto mem = alloc.duplicate(src);
+        assert(mem.length == 5);
+        assert((cast(ubyte[])mem)[0] == 'h');
+        assert((cast(ubyte[])mem)[4] == 'o');
+        alloc.deallocate(mem);
+    }
+
+    writeln("[unittest] Allocator.reallocate");
+    {
+        auto alloc = GlobalAllocator.instance();
+        auto mem = alloc.allocate(16);
+        (cast(ubyte[])mem)[0] = 0xFF;
+        auto mem2 = alloc.reallocate(mem, 32);
+        assert(mem2.length == 32);
+        assert((cast(ubyte[])mem2)[0] == 0xFF);
+        alloc.deallocate(mem2);
+    }
+
+    writeln("[unittest] Allocator.copyMemory");
+    {
+        ubyte[4] src = [1, 2, 3, 4];
+        ubyte[4] dst;
+        Allocator.copyMemory(src[], dst[]);
+        assert(dst[0] == 1);
+        assert(dst[3] == 4);
+
+        ubyte[2] dst2;
+        Allocator.copyMemory(src[], dst2[]);
+        assert(dst2[0] == 1);
+        assert(dst2[1] == 2);
     }
 }

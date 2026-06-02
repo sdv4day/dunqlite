@@ -18,3 +18,12 @@ enum ErrorCode {
     IO_ERROR = -4,   /// IO错误
     LIMIT = -5       /// 达到限制
 }
+
+unittest {
+    assert(ErrorCode.OK == 0);
+    assert(ErrorCode.NOT_FOUND == -1);
+    assert(ErrorCode.NO_MEMORY == -2);
+    assert(ErrorCode.INVALID == -3);
+    assert(ErrorCode.IO_ERROR == -4);
+    assert(ErrorCode.LIMIT == -5);
+}

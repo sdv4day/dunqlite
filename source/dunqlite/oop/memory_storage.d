@@ -166,7 +166,6 @@ class MemoryStorage : Storage {
         
         auto node = last_;
         for (uint i = 0; i < count_; i++) {
-            node.nextHash = null;
             uint idx = node.entry.hash & (newCount - 1);
             node.nextHash = newBuckets[idx];
             newBuckets[idx] = node;
@@ -338,5 +337,198 @@ class MemoryStorage : Storage {
         lock_.lock();
         scope(exit) lock_.unlock();
         return last_;
+    }
+}
+
+unittest {
+    import std.stdio;
+    import std.format : format;
+
+    writeln("[unittest] MemoryStorage put/get/remove/contains");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        int rc = ms.put("key1".ptr, 4, "val1".ptr, 4);
+        assert(rc == ErrorCode.OK);
+        assert(ms.count() == 1);
+        assert(ms.contains("key1".ptr, 4));
+        assert(!ms.contains("key2".ptr, 4));
+
+        long bufLen = 256;
+        char[256] buf;
+        rc = ms.get("key1".ptr, 4, buf.ptr, &bufLen);
+        assert(rc == ErrorCode.OK);
+        assert(bufLen == 4);
+
+        rc = ms.remove("key1".ptr, 4);
+        assert(rc == ErrorCode.OK);
+        assert(ms.count() == 0);
+        assert(!ms.contains("key1".ptr, 4));
+    }
+
+    writeln("[unittest] MemoryStorage put 覆盖更新");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        ms.put("key".ptr, 3, "v1".ptr, 2);
+        ms.put("key".ptr, 3, "value2_long".ptr, 11);
+
+        long bufLen = 256;
+        char[256] buf;
+        int rc = ms.get("key".ptr, 3, buf.ptr, &bufLen);
+        assert(rc == ErrorCode.OK);
+        assert(bufLen == 11);
+    }
+
+    writeln("[unittest] MemoryStorage get 查询长度");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        ms.put("key".ptr, 3, "value".ptr, 5);
+
+        long bufLen = 0;
+        int rc = ms.get("key".ptr, 3, null, &bufLen);
+        assert(rc == ErrorCode.OK);
+        assert(bufLen == 5);
+    }
+
+    writeln("[unittest] MemoryStorage get 不存在的键");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        long bufLen = 256;
+        char[256] buf;
+        int rc = ms.get("missing".ptr, 7, buf.ptr, &bufLen);
+        assert(rc == ErrorCode.NOT_FOUND);
+    }
+
+    writeln("[unittest] MemoryStorage remove 不存在的键");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        int rc = ms.remove("missing".ptr, 7);
+        assert(rc == ErrorCode.NOT_FOUND);
+    }
+
+    writeln("[unittest] MemoryStorage clear");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        ms.put("k1".ptr, 2, "v1".ptr, 2);
+        ms.put("k2".ptr, 2, "v2".ptr, 2);
+        assert(ms.count() == 2);
+
+        ms.clear();
+        assert(ms.count() == 0);
+        assert(ms.isEmpty());
+    }
+
+    writeln("[unittest] MemoryStorage isEmpty/count");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        assert(ms.isEmpty());
+        assert(ms.count() == 0);
+
+        ms.put("k".ptr, 1, "v".ptr, 1);
+        assert(!ms.isEmpty());
+        assert(ms.count() == 1);
+    }
+
+    writeln("[unittest] MemoryStorage createCursor 遍历");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        ms.put("k1".ptr, 2, "v1".ptr, 2);
+        ms.put("k2".ptr, 2, "v2".ptr, 2);
+        ms.put("k3".ptr, 2, "v3".ptr, 2);
+
+        auto cursor = ms.createCursor();
+        scope(exit) {
+            cursor.reset();
+            destroy(cursor);
+        }
+
+        int count = 0;
+        for (cursor.moveFirst(); cursor.isValid(); cursor.moveNext()) {
+            assert(cursor.key() !is null);
+            assert(cursor.value() !is null);
+            assert(cursor.keyLength() > 0);
+            assert(cursor.valueLength() > 0);
+            count++;
+        }
+        assert(count == 3);
+    }
+
+    writeln("[unittest] MemoryStorage 游标 moveLast/movePrevious");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        ms.put("k1".ptr, 2, "v1".ptr, 2);
+        ms.put("k2".ptr, 2, "v2".ptr, 2);
+        ms.put("k3".ptr, 2, "v3".ptr, 2);
+
+        auto cursor = ms.createCursor();
+        scope(exit) {
+            cursor.reset();
+            destroy(cursor);
+        }
+
+        assert(cursor.moveLast());
+        assert(cursor.isValid());
+
+        int count = 1;
+        while (cursor.movePrevious()) {
+            count++;
+        }
+        assert(count == 3);
+    }
+
+    writeln("[unittest] MemoryStorage 游标 remove");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        ms.put("k1".ptr, 2, "v1".ptr, 2);
+        ms.put("k2".ptr, 2, "v2".ptr, 2);
+
+        auto cursor = ms.createCursor();
+        scope(exit) {
+            cursor.reset();
+            destroy(cursor);
+        }
+
+        cursor.moveFirst();
+        int rc = cursor.remove();
+        assert(rc == ErrorCode.OK);
+        assert(ms.count() == 1);
+    }
+
+    writeln("[unittest] MemoryStorage 大量数据插入与扩容");
+    {
+        auto ms = new MemoryStorage();
+        scope(exit) destroy(ms);
+
+        for (int i = 0; i < 500; i++) {
+            auto key = format("key_%d", i);
+            auto val = format("val_%d", i);
+            int rc = ms.put(key.ptr, cast(int)key.length, val.ptr, cast(int)val.length);
+            assert(rc == ErrorCode.OK);
+        }
+        assert(ms.count() == 500);
+
+        for (int i = 0; i < 500; i++) {
+            auto key = format("key_%d", i);
+            assert(ms.contains(key.ptr, cast(int)key.length));
+        }
     }
 }

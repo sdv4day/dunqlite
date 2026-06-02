@@ -83,3 +83,88 @@ class Transaction {
      */
     bool isActive() { return state_ == State.Active; }
 }
+
+unittest {
+    import std.stdio;
+    import dunqlite.oop.memory_storage;
+
+    writeln("[unittest] Transaction begin/isActive");
+    {
+        auto ms = new MemoryStorage();
+        auto tx = new Transaction(ms);
+        scope(exit) destroy(tx);
+
+        assert(!tx.isActive());
+        int rc = tx.begin();
+        assert(rc == ErrorCode.OK);
+        assert(tx.isActive());
+    }
+
+    writeln("[unittest] Transaction commit");
+    {
+        auto ms = new MemoryStorage();
+        auto tx = new Transaction(ms);
+        scope(exit) destroy(tx);
+
+        tx.begin();
+        int rc = tx.commit();
+        assert(rc == ErrorCode.OK);
+        assert(!tx.isActive());
+    }
+
+    writeln("[unittest] Transaction rollback");
+    {
+        auto ms = new MemoryStorage();
+        auto tx = new Transaction(ms);
+        scope(exit) destroy(tx);
+
+        tx.begin();
+        int rc = tx.rollback();
+        assert(rc == ErrorCode.OK);
+        assert(!tx.isActive());
+    }
+
+    writeln("[unittest] Transaction 重复 begin");
+    {
+        auto ms = new MemoryStorage();
+        auto tx = new Transaction(ms);
+        scope(exit) destroy(tx);
+
+        tx.begin();
+        int rc = tx.begin();
+        assert(rc == ErrorCode.OK);
+        assert(tx.isActive());
+    }
+
+    writeln("[unittest] Transaction 未激活时 commit");
+    {
+        auto ms = new MemoryStorage();
+        auto tx = new Transaction(ms);
+        scope(exit) destroy(tx);
+
+        int rc = tx.commit();
+        assert(rc == ErrorCode.INVALID);
+    }
+
+    writeln("[unittest] Transaction 未激活时 rollback");
+    {
+        auto ms = new MemoryStorage();
+        auto tx = new Transaction(ms);
+        scope(exit) destroy(tx);
+
+        int rc = tx.rollback();
+        assert(rc == ErrorCode.INVALID);
+    }
+
+    writeln("[unittest] Transaction commit 后不可 rollback");
+    {
+        auto ms = new MemoryStorage();
+        auto tx = new Transaction(ms);
+        scope(exit) destroy(tx);
+
+        tx.begin();
+        tx.commit();
+        int rc = tx.rollback();
+        assert(rc == ErrorCode.INVALID);
+    }
+}

@@ -19,6 +19,7 @@ import dunqlite.oop.shared_lock;
 
 import std.traits;
 import std.conv : text;
+import std.range.primitives : ElementEncodingType, ElementType;
 import core.sync.mutex;
 
 /**
@@ -99,7 +100,7 @@ class Database {
         }
         
         // 多进程文件锁
-        if (filename !is null) {
+        if (!inMemory && filename !is null) {
             dbPath_ = text(filename);
             auto lockPath = dbPath_ ~ ".lock";
             fileLock_ = new SharedFileLock(lockPath);
@@ -179,6 +180,8 @@ class Database {
      *   错误码
      */
     int put(const(void)* key, int keyLen, const(void)* value, long valueLen) {
+        dbLock_.lock();
+        scope(exit) dbLock_.unlock();
         if (!isOpen()) return ErrorCode.INVALID;
         return storage_.put(key, keyLen, value, valueLen);
     }
@@ -196,6 +199,8 @@ class Database {
      *   错误码
      */
     int get(const(void)* key, int keyLen, void* buf, long* bufLen) {
+        dbLock_.lock();
+        scope(exit) dbLock_.unlock();
         if (!isOpen()) return ErrorCode.INVALID;
         return storage_.get(key, keyLen, buf, bufLen);
     }
@@ -211,6 +216,8 @@ class Database {
      *   错误码
      */
     int remove(const(void)* key, int keyLen) {
+        dbLock_.lock();
+        scope(exit) dbLock_.unlock();
         if (!isOpen()) return ErrorCode.INVALID;
         return storage_.remove(key, keyLen);
     }
@@ -226,6 +233,8 @@ class Database {
      *   是否存在
      */
     bool contains(const(void)* key, int keyLen) {
+        dbLock_.lock();
+        scope(exit) dbLock_.unlock();
         if (!isOpen()) return false;
         return storage_.contains(key, keyLen);
     }
@@ -495,7 +504,6 @@ private:
             return Slice(val);
         }
         else static if (isDynamicArray!T) {
-            import std.range.primitives : ElementEncodingType;
             static if (is(ElementEncodingType!T == ubyte) || is(ElementEncodingType!T == const(ubyte))) {
                 return Slice(val);
             }
@@ -507,7 +515,7 @@ private:
             }
         }
         else static if (isPointer!T) {
-            return Slice(cast(const(void*)) val, T.sizeof);
+            return Slice(cast(const(void*)) val, (ElementType!T).sizeof);
         }
         else {
             // 基本类型和POD结构体：堆分配避免TLS竞争和栈悬空
@@ -523,16 +531,281 @@ private:
             return s.asString().idup;
         }
         else static if (isDynamicArray!V && !is(V == class)) {
-            import std.range.primitives : ElementEncodingType;
             auto result = new V(s.length / ElementEncodingType!V.sizeof);
             result[] = (cast(ElementEncodingType!V[]) s.asBytes())[0 .. result.length];
             return result;
         }
         else {
-            V result;
-            const(ubyte)* src = s.data();
-            (cast(ubyte*)&result)[0 .. V.sizeof] = src[0 .. V.sizeof];
+            V result = V.init;
+            if (s.size() >= V.sizeof) {
+                const(ubyte)* src = s.data();
+                (cast(ubyte*)&result)[0 .. V.sizeof] = src[0 .. V.sizeof];
+            }
             return result;
         }
+    }
+}
+
+unittest {
+    import std.stdio;
+
+    writeln("[unittest] Database open/close 内存模式");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        int rc = db.open(null, true);
+        assert(rc == ErrorCode.OK);
+        assert(db.isOpen());
+        assert(db.isInMemory());
+        assert(!db.isReadOnly());
+    }
+
+    writeln("[unittest] Database 重复 open");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+        int rc = db.open(null, true);
+        assert(rc == ErrorCode.OK);
+    }
+
+    writeln("[unittest] Database 未打开时操作返回错误");
+    {
+        auto db = new Database();
+        scope(exit) destroy(db);
+
+        assert(db.put("k".ptr, 1, "v".ptr, 1) == ErrorCode.INVALID);
+        assert(!db.contains("k".ptr, 1));
+        assert(db.count() == 0);
+        assert(db.isEmpty());
+    }
+
+    writeln("[unittest] Database 原始指针 put/get/remove/contains");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        int rc = db.put("name".ptr, 4, "DunQLite".ptr, 8);
+        assert(rc == ErrorCode.OK);
+        assert(db.count() == 1);
+        assert(db.contains("name".ptr, 4));
+
+        long bufLen = 256;
+        char[256] buf;
+        rc = db.get("name".ptr, 4, buf.ptr, &bufLen);
+        assert(rc == ErrorCode.OK);
+        assert(bufLen == 8);
+
+        rc = db.remove("name".ptr, 4);
+        assert(rc == ErrorCode.OK);
+        assert(db.count() == 0);
+    }
+
+    writeln("[unittest] Database 泛型 put/get/del/find 字符串");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        db.put("name", "DunQLite");
+        db.put("version", "2.0");
+
+        string name;
+        assert(db.get("name", name));
+        assert(name == "DunQLite");
+
+        string ver = db.find("version", "unknown");
+        assert(ver == "2.0");
+
+        string missing = db.find("missing", "default");
+        assert(missing == "default");
+
+        db.del("version");
+        string v2;
+        assert(!db.get("version", v2));
+    }
+
+    writeln("[unittest] Database 泛型 put/get 整数/浮点/布尔");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        db.put("count", 42);
+        db.put("price", 99.99);
+        db.put("flag", true);
+
+        int countVal;
+        assert(db.get("count", countVal));
+        assert(countVal == 42);
+
+        double priceVal;
+        assert(db.get("price", priceVal));
+        assert(priceVal == 99.99);
+
+        bool flagVal;
+        assert(db.get("flag", flagVal));
+        assert(flagVal == true);
+    }
+
+    writeln("[unittest] Database 泛型 put/get 结构体");
+    {
+        struct Point { int x; int y; }
+
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        auto p = Point(10, 20);
+        db.put("point", p);
+
+        Point p2;
+        assert(db.get("point", p2));
+        assert(p2.x == 10);
+        assert(p2.y == 20);
+    }
+
+    writeln("[unittest] Database 泛型 put/get 数组");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        int[] numbers = [1, 2, 3, 4, 5];
+        db.put("numbers", numbers);
+
+        int[] result;
+        assert(db.get("numbers", result));
+        assert(result.length == 5);
+        assert(result[0] == 1);
+        assert(result[4] == 5);
+    }
+
+    writeln("[unittest] Database opIndex/opIndexAssign");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        db["lang"] = "D语言";
+        auto s = db["lang"];
+        assert(s.asString() == "D语言");
+    }
+
+    writeln("[unittest] Database getSlice");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        db.put("key", "value");
+        auto s = db.getSlice("key");
+        assert(s.ok());
+        assert(s.asString() == "value");
+
+        auto s2 = db.getSlice("missing");
+        assert(s2.empty());
+    }
+
+    writeln("[unittest] Database 事务 begin/commit/rollback");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        assert(db.beginTransaction() == ErrorCode.OK);
+        assert(db.transaction().isActive());
+
+        assert(db.commit() == ErrorCode.OK);
+        assert(!db.transaction().isActive());
+
+        db.beginTransaction();
+        assert(db.rollback() == ErrorCode.OK);
+        assert(!db.transaction().isActive());
+    }
+
+    writeln("[unittest] Database createCursor");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+
+        db.put("k1", "v1");
+        db.put("k2", "v2");
+
+        auto cursor = db.createCursor();
+        assert(cursor !is null);
+
+        int count = 0;
+        for (cursor.moveFirst(); cursor.isValid(); cursor.moveNext()) {
+            count++;
+        }
+        assert(count == 2);
+
+        cursor.reset();
+        destroy(cursor);
+    }
+
+    writeln("[unittest] Database path/count/isEmpty");
+    {
+        auto db = new Database();
+        scope(exit) {
+            db.close();
+            destroy(db);
+        }
+
+        db.open(null, true);
+        assert(db.path() is null);
+        assert(db.count() == 0);
+        assert(db.isEmpty());
+
+        db.put("k", "v");
+        assert(db.count() == 1);
+        assert(!db.isEmpty());
     }
 }

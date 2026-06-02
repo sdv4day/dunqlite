@@ -178,3 +178,144 @@ struct Slice {
 template isPODStruct(T) {
     enum isPODStruct = is(T == struct) && !isDynamicArray!T && !isSomeString!T;
 }
+
+unittest {
+    import std.stdio;
+
+    writeln("[unittest] Slice 构造函数");
+    {
+        auto s1 = Slice(cast(const(ubyte)[])[1, 2, 3]);
+        assert(s1.size() == 3);
+        assert(s1.data() !is null);
+
+        auto s2 = Slice("hello");
+        assert(s2.size() == 5);
+
+        int val = 42;
+        auto s3 = Slice(&val, int.sizeof);
+        assert(s3.size() == int.sizeof);
+    }
+
+    writeln("[unittest] Slice empty/ok/clear");
+    {
+        Slice s;
+        assert(s.empty());
+        assert(!s.ok());
+        assert(s.size() == 0);
+
+        auto s2 = Slice("abc");
+        assert(!s2.empty());
+        assert(s2.ok());
+
+        s2.clear();
+        assert(s2.empty());
+        assert(s2.size() == 0);
+    }
+
+    writeln("[unittest] Slice asBytes/asString");
+    {
+        auto s = Slice("hello");
+        auto bytes = s.asBytes();
+        assert(bytes.length == 5);
+        assert(bytes[0] == 'h');
+        assert(bytes[4] == 'o');
+
+        auto str = s.asString();
+        assert(str == "hello");
+    }
+
+    writeln("[unittest] Slice as!T 类型转换");
+    {
+        auto s = Slice("world");
+        assert(s.as!string() == "world");
+
+        int val = 12345;
+        auto s2 = Slice(&val, int.sizeof);
+        assert(s2.as!int() == 12345);
+
+        double dval = 3.14;
+        auto s3 = Slice(&dval, double.sizeof);
+        assert(s3.as!double() == 3.14);
+    }
+
+    writeln("[unittest] Slice Ref!T");
+    {
+        auto s = Slice.Ref(42);
+        assert(s.size() == int.sizeof);
+        assert(s.as!int() == 42);
+
+        auto s2 = Slice.Ref(3.14);
+        assert(s2.size() == double.sizeof);
+        assert(s2.as!double() == 3.14);
+
+        auto s3 = Slice.Ref(true);
+        assert(s3.size() == bool.sizeof);
+    }
+
+    writeln("[unittest] Slice opCmp/opEquals");
+    {
+        auto s1 = Slice("abc");
+        auto s2 = Slice("abc");
+        auto s3 = Slice("abd");
+        auto s4 = Slice("ab");
+
+        assert(s1 == s2);
+        assert(s1 != s3);
+        assert(s1 != s4);
+        assert(s1.opCmp(s3) < 0);
+        assert(s3.opCmp(s1) > 0);
+        assert(s1.opCmp(s2) == 0);
+    }
+
+    writeln("[unittest] Slice toHash");
+    {
+        auto s1 = Slice("hello");
+        auto s2 = Slice("hello");
+        auto s3 = Slice("world");
+
+        assert(s1.toHash() == s2.toHash());
+        assert(s1.toHash() != s3.toHash());
+
+        Slice empty;
+        assert(empty.toHash() == 0);
+    }
+
+    writeln("[unittest] Slice startsWith/endsWith");
+    {
+        auto s = Slice("hello world");
+
+        assert(s.startsWith(Slice("hello")));
+        assert(!s.startsWith(Slice("world")));
+        assert(s.endsWith(Slice("world")));
+        assert(!s.endsWith(Slice("hello")));
+        assert(s.startsWith(Slice("")));
+        assert(s.endsWith(Slice("")));
+    }
+
+    writeln("[unittest] Slice removePrefix");
+    {
+        auto s = Slice("hello world");
+        auto s2 = s.removePrefix(6);
+        assert(s2.asString() == "world");
+
+        auto s3 = s.removePrefix(0);
+        assert(s3.asString() == "hello world");
+    }
+
+    writeln("[unittest] Slice toString");
+    {
+        auto s = Slice("test");
+        assert(s.toString() == "test");
+
+        Slice empty;
+        assert(empty.toString() == "");
+    }
+
+    writeln("[unittest] isPODStruct");
+    {
+        struct Point { int x; int y; }
+        assert(isPODStruct!Point);
+        assert(!isPODStruct!int);
+        assert(!isPODStruct!string);
+    }
+}

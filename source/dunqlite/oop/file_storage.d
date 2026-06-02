@@ -59,7 +59,20 @@ class FileStorage : Storage {
     private Mutex lock_;
     private string filePath_;
     private Wal wal_;
-    private string tempPath_; // 临时文件路径，用于原子写入
+    private string tempPath_;
+
+    version (Windows) {
+        import core.sys.windows.windows : MultiByteToWideChar, CP_UTF8;
+
+        static wchar[] toWideString(string s) {
+            auto result = new wchar[](s.length + 1);
+            int len = MultiByteToWideChar(CP_UTF8, 0,
+                s.ptr, cast(int)s.length,
+                result.ptr, cast(int)result.length);
+            result[len] = 0;
+            return result[0 .. len + 1];
+        }
+    }
     
     /**
      * 构造函数
@@ -75,24 +88,18 @@ class FileStorage : Storage {
         filePath_ = filePath;
         tempPath_ = filePath ~ ".tmp";
         
-        // 初始化 WAL
         wal_ = new Wal(filePath_);
         
-        // 先初始化 memStorage_
         memStorage_ = new MemoryStorage(allocator_);
         
-        // 从文件加载记录
         loadFromFile();
         
-        // 重放 WAL 日志（崩溃恢复）
         replayWal();
         
-        // 打开 WAL 用于后续写入
         wal_.open();
     }
     
     ~this() {
-        // 析构函数不调用close()，避免循环调用
         wal_.close();
         destroy(lock_);
     }
@@ -101,36 +108,30 @@ class FileStorage : Storage {
      * 从文件加载记录
      */
     private void loadFromFile() {
-        import std.stdio : writefln;
-        
         File f;
         try {
             f = File(filePath_, "rb");
         } catch (Exception e) {
-            return; // 文件不存在或打开失败，视为新数据库
+            return;
         }
         
         scope(exit) f.close();
         
-        // 读取文件头
         ubyte[HEADER_SIZE] headerBuf;
         auto bytesRead = f.rawRead(headerBuf[]);
         if (bytesRead.length < HEADER_SIZE) {
-            return; // 文件太小，无效
+            return;
         }
         
         FileHeader* header = cast(FileHeader*) headerBuf.ptr;
         if (header.magic != MAGIC) {
-            return; // 魔数不匹配，无效文件
+            return;
         }
         
         if (header.ver != VERSION) {
-            return; // 版本不匹配
+            return;
         }
         
-        writefln("[FileStorage] 从文件加载 %d 条记录", header.recordCount);
-        
-        // 读取所有记录
         while (true) {
             RecordHeader recHdr;
             bytesRead = f.rawRead((cast(ubyte*)&recHdr)[0 .. RecordHeader.sizeof]);
@@ -140,37 +141,21 @@ class FileStorage : Storage {
             
             if (recHdr.keyLength == 0) break;
             
-            // 读取键
-            if (recHdr.keyLength > 1024) {
-                writefln("[FileStorage] 键过长: %d", recHdr.keyLength);
-                break;
-            }
-            ubyte[1024] keyTmp = void;
-            auto keyRead = f.rawRead(keyTmp[0 .. recHdr.keyLength]);
+            auto keyBuf = new ubyte[recHdr.keyLength];
+            auto keyRead = f.rawRead(keyBuf);
             if (keyRead.length != recHdr.keyLength) {
-                writefln("[FileStorage] 读取键失败: 需要%d, 实际%d", recHdr.keyLength, keyRead.length);
                 break;
             }
             
-            // 读取值
             if (recHdr.valueLength == 0) break;
-            if (recHdr.valueLength > 4096) {
-                writefln("[FileStorage] 值过长: %d", recHdr.valueLength);
-                break;
-            }
-            ubyte[4096] valTmp = void;
-            auto valRead = f.rawRead(valTmp[0 .. cast(size_t)recHdr.valueLength]);
+            auto valBuf = new ubyte[cast(size_t)recHdr.valueLength];
+            auto valRead = f.rawRead(valBuf);
             if (valRead.length != cast(size_t)recHdr.valueLength) {
-                writefln("[FileStorage] 读取值失败: 需要%d, 实际%d", recHdr.valueLength, valRead.length);
                 break;
             }
             
-            // 插入到内存哈希表（MemoryStorage.put 内部会复制数据）
-            int rc = memStorage_.put(keyRead.ptr, cast(int)recHdr.keyLength, 
+            memStorage_.put(keyRead.ptr, cast(int)recHdr.keyLength, 
                            valRead.ptr, cast(long)recHdr.valueLength);
-            if (rc != ErrorCode.OK) {
-                writefln("[FileStorage] 插入记录失败: rc=%d", rc);
-            }
         }
     }
     
@@ -178,34 +163,24 @@ class FileStorage : Storage {
      * 重放 WAL 日志（崩溃恢复）
      */
     private void replayWal() {
-        import std.stdio : writefln;
-        
         if (!wal_.exists()) return;
         
-        writefln("[FileStorage] 重放 WAL 日志...");
-        
         wal_.replay(
-            // onPut 回调
             (const(void)* key, uint keyLen, const(void)* value, uint valLen) {
                 int rc = memStorage_.put(key, cast(int)keyLen, value, cast(long)valLen);
                 return rc == ErrorCode.OK;
             },
-            // onRemove 回调
             (const(void)* key, uint keyLen) {
                 int rc = memStorage_.remove(key, cast(int)keyLen);
                 return rc == ErrorCode.OK;
             }
         );
-        
-        writefln("[FileStorage] WAL 重放完成");
     }
     
     /**
      * 保存记录到文件（原子写入）
      */
     private int saveToFile() {
-        import std.stdio : writefln;
-        
         int writeResult = writeTempFile();
         if (writeResult != ErrorCode.OK) {
             return writeResult;
@@ -218,13 +193,10 @@ class FileStorage : Storage {
      * 写入临时文件
      */
     private int writeTempFile() {
-        import std.stdio : writefln;
-        
         File f;
         try {
             f = File(tempPath_, "wb");
         } catch (Exception e) {
-            writefln("[FileStorage] 创建临时文件失败: %s", e.msg);
             return ErrorCode.IO_ERROR;
         }
         
@@ -232,8 +204,6 @@ class FileStorage : Storage {
             f.flush();
             f.close();
         }
-        
-        writefln("[FileStorage] 开始写入 %d 条记录", memStorage_.count());
         
         FileHeader header;
         header.recordCount = memStorage_.count();
@@ -245,7 +215,6 @@ class FileStorage : Storage {
             destroy(cursor);
         }
         
-        int written = 0;
         for (cursor.moveFirst(); cursor.isValid(); cursor.moveNext()) {
             RecordHeader recHdr;
             recHdr.keyLength = cursor.keyLength();
@@ -254,10 +223,8 @@ class FileStorage : Storage {
             
             f.rawWrite((cast(ubyte*)cursor.key())[0 .. recHdr.keyLength]);
             f.rawWrite((cast(ubyte*)cursor.value())[0 .. recHdr.valueLength]);
-            written++;
         }
         
-        writefln("[FileStorage] 写入 %d 条记录完成", written);
         return ErrorCode.OK;
     }
     
@@ -265,16 +232,12 @@ class FileStorage : Storage {
      * 原子重命名临时文件
      */
     private int atomicRename() {
-        import std.stdio : writefln;
-        
         version (Windows) {
             import core.sys.windows.windows : MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH;
-            import std.conv : to;
             
-            auto wSrc = tempPath_.to!wstring();
-            auto wDst = filePath_.to!wstring();
+            auto wSrc = toWideString(tempPath_);
+            auto wDst = toWideString(filePath_);
             if (!MoveFileExW(wSrc.ptr, wDst.ptr, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-                writefln("[FileStorage] 原子写入失败 (MoveFileExW)");
                 return ErrorCode.IO_ERROR;
             }
         } else {
@@ -284,7 +247,6 @@ class FileStorage : Storage {
                 }
                 .rename(tempPath_, filePath_);
             } catch (Exception e) {
-                writefln("[FileStorage] 原子写入失败: %s", e.msg);
                 return ErrorCode.IO_ERROR;
             }
         }
@@ -382,5 +344,137 @@ class FileStorage : Storage {
             memStorage_.clear();
         }
         return rc;
+    }
+}
+
+unittest {
+    import std.stdio;
+    import std.file : exists, remove;
+
+    static void cleanupTestFiles(string basePath) {
+        foreach (suffix; ["", ".lock", ".wal", ".wal.old"]) {
+            auto p = basePath ~ suffix;
+            if (exists(p)) {
+                try { remove(p); } catch (Exception) {}
+            }
+        }
+    }
+
+    writeln("[unittest] FileStorage 创建/写入/读取/关闭");
+    {
+        string testPath = "test_file_storage_db.tmp";
+        cleanupTestFiles(testPath);
+
+        auto fs = new FileStorage(testPath);
+        scope(exit) {
+            destroy(fs);
+            cleanupTestFiles(testPath);
+        }
+
+        fs.put("key1".ptr, 4, "val1".ptr, 4);
+        fs.put("key2".ptr, 4, "val2".ptr, 4);
+        assert(fs.count() == 2);
+
+        long bufLen = 256;
+        char[256] buf;
+        int rc = fs.get("key1".ptr, 4, buf.ptr, &bufLen);
+        assert(rc == ErrorCode.OK);
+        assert(bufLen == 4);
+
+        assert(fs.contains("key1".ptr, 4));
+        assert(!fs.contains("missing".ptr, 7));
+
+        fs.remove("key1".ptr, 4);
+        assert(fs.count() == 1);
+    }
+
+    writeln("[unittest] FileStorage sync 刷盘");
+    {
+        string testPath = "test_sync_db.tmp";
+        cleanupTestFiles(testPath);
+
+        auto fs = new FileStorage(testPath);
+        scope(exit) {
+            destroy(fs);
+            cleanupTestFiles(testPath);
+        }
+
+        fs.put("k1".ptr, 2, "v1".ptr, 2);
+        int rc = fs.sync();
+        assert(rc == ErrorCode.OK);
+    }
+
+    writeln("[unittest] FileStorage 持久化与重新加载");
+    {
+        string testPath = "test_persist_db.tmp";
+        cleanupTestFiles(testPath);
+
+        auto fs1 = new FileStorage(testPath);
+        fs1.put("name".ptr, 4, "DunQLite".ptr, 8);
+        fs1.put("ver".ptr, 3, "2.0".ptr, 3);
+        fs1.sync();
+        destroy(fs1);
+
+        auto fs2 = new FileStorage(testPath);
+        scope(exit) {
+            destroy(fs2);
+            cleanupTestFiles(testPath);
+        }
+
+        assert(fs2.count() == 2);
+        assert(fs2.contains("name".ptr, 4));
+
+        long bufLen = 256;
+        char[256] buf;
+        int rc = fs2.get("name".ptr, 4, buf.ptr, &bufLen);
+        assert(rc == ErrorCode.OK);
+        assert(bufLen == 8);
+    }
+
+    writeln("[unittest] FileStorage clear");
+    {
+        string testPath = "test_clear_db.tmp";
+        cleanupTestFiles(testPath);
+
+        auto fs = new FileStorage(testPath);
+        scope(exit) {
+            destroy(fs);
+            cleanupTestFiles(testPath);
+        }
+
+        fs.put("k1".ptr, 2, "v1".ptr, 2);
+        fs.put("k2".ptr, 2, "v2".ptr, 2);
+        assert(fs.count() == 2);
+
+        fs.clear();
+        assert(fs.count() == 0);
+        assert(fs.isEmpty());
+    }
+
+    writeln("[unittest] FileStorage createCursor");
+    {
+        string testPath = "test_cursor_db.tmp";
+        cleanupTestFiles(testPath);
+
+        auto fs = new FileStorage(testPath);
+        scope(exit) {
+            destroy(fs);
+            cleanupTestFiles(testPath);
+        }
+
+        fs.put("k1".ptr, 2, "v1".ptr, 2);
+        fs.put("k2".ptr, 2, "v2".ptr, 2);
+
+        auto cursor = fs.createCursor();
+        assert(cursor !is null);
+
+        int count = 0;
+        for (cursor.moveFirst(); cursor.isValid(); cursor.moveNext()) {
+            count++;
+        }
+        assert(count == 2);
+
+        cursor.reset();
+        destroy(cursor);
     }
 }

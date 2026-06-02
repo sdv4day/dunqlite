@@ -6,7 +6,6 @@
  */
 module dunqlite.oop.shared_lock;
 
-import std.stdio;
 import std.conv : text;
 
 /**
@@ -19,6 +18,13 @@ final class SharedFileLock {
     private string lockFilePath_;
     private bool writeLocked_ = false;
     private bool readLocked_ = false;
+
+    version (Windows) {
+        private void* hFile_ = null;
+    }
+    version (Posix) {
+        private int fd_ = -1;
+    }
     
     /**
      * 构造函数
@@ -68,6 +74,7 @@ final class SharedFileLock {
                 return false;
             }
             
+            hFile_ = hFile;
             writeLocked_ = true;
             return true;
         }
@@ -89,6 +96,7 @@ final class SharedFileLock {
                 return false;
             }
             
+            fd_ = fd;
             writeLocked_ = true;
             return true;
         }
@@ -130,6 +138,7 @@ final class SharedFileLock {
                 return false;
             }
             
+            hFile_ = hFile;
             readLocked_ = true;
             return true;
         }
@@ -151,6 +160,7 @@ final class SharedFileLock {
                 return false;
             }
             
+            fd_ = fd;
             readLocked_ = true;
             return true;
         }
@@ -168,14 +178,7 @@ final class SharedFileLock {
         version (Windows) {
             import core.sys.windows.windows;
             
-            auto wpath = toWideString(lockFilePath_);
-            auto hFile = CreateFileW(wpath.ptr,
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                null, OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL, null);
-            
-            if (hFile != INVALID_HANDLE_VALUE) {
+            if (hFile_ !is null && hFile_ != INVALID_HANDLE_VALUE) {
                 OVERLAPPED overlapped;
                 overlapped.Internal = 0;
                 overlapped.InternalHigh = 0;
@@ -183,22 +186,23 @@ final class SharedFileLock {
                 overlapped.OffsetHigh = 0;
                 overlapped.hEvent = null;
                 
-                UnlockFileEx(hFile, 0, 0xFFFF_FFFF, 0xFFFF_FFFF, &overlapped);
-                CloseHandle(hFile);
+                UnlockFileEx(hFile_, 0, 0xFFFF_FFFF, 0xFFFF_FFFF, &overlapped);
+                CloseHandle(hFile_);
+                hFile_ = null;
             }
         }
         else version (Posix) {
             import core.sys.posix.fcntl;
             
-            int fd = open(lockFilePath_.ptr, O_RDWR);
-            if (fd >= 0) {
+            if (fd_ >= 0) {
                 flock fl;
                 fl.l_type = F_UNLCK;
                 fl.l_whence = SEEK_SET;
                 fl.l_start = 0;
                 fl.l_len = 0;
-                fcntl(fd, F_SETLK, &fl);
-                close(fd);
+                fcntl(fd_, F_SETLK, &fl);
+                close(fd_);
+                fd_ = -1;
             }
         }
         
@@ -241,11 +245,34 @@ final class SharedFileLock {
                 return false;
             }
             
+            hFile_ = hFile;
+            writeLocked_ = true;
+            return true;
+        }
+        else version (Posix) {
+            import core.sys.posix.fcntl;
+            
+            int fd = open(lockFilePath_.ptr, O_RDWR | O_CREAT, 438);
+            if (fd < 0) return false;
+            
+            flock fl;
+            fl.l_type = F_WRLCK;
+            fl.l_whence = SEEK_SET;
+            fl.l_start = 0;
+            fl.l_len = 0;
+            
+            int rc = fcntl(fd, F_SETLK, &fl);
+            if (rc < 0) {
+                close(fd);
+                return false;
+            }
+            
+            fd_ = fd;
             writeLocked_ = true;
             return true;
         }
         else {
-            return lockWrite();
+            return false;
         }
     }
     

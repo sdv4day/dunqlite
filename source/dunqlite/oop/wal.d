@@ -310,3 +310,132 @@ class Wal {
         return open();
     }
 }
+
+unittest {
+    import std.stdio;
+    import std.file : exists, remove;
+
+    writeln("[unittest] Wal open/close");
+    {
+        string dbPath = "test_wal_open.tmp";
+        string walPath = dbPath ~ ".wal";
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+
+        auto wal = new Wal(dbPath);
+        assert(!wal.isOpen_);
+
+        assert(wal.open());
+        assert(wal.isOpen_);
+
+        wal.close();
+        assert(!wal.isOpen_);
+
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+    }
+
+    writeln("[unittest] Wal logPut/logRemove");
+    {
+        string dbPath = "test_wal_log.tmp";
+        string walPath = dbPath ~ ".wal";
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+
+        auto wal = new Wal(dbPath);
+        wal.open();
+
+        assert(wal.logPut("key1".ptr, 4, "val1".ptr, 4));
+        assert(wal.logPut("key2".ptr, 4, "val2".ptr, 4));
+        assert(wal.logRemove("key1".ptr, 4));
+
+        wal.close();
+        assert(exists(walPath));
+
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+    }
+
+    writeln("[unittest] Wal replay");
+    {
+        string dbPath = "test_wal_replay.tmp";
+        string walPath = dbPath ~ ".wal";
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+
+        auto wal = new Wal(dbPath);
+        wal.open();
+        wal.logPut("key1".ptr, 4, "val1".ptr, 4);
+        wal.logPut("key2".ptr, 4, "val2".ptr, 4);
+        wal.logRemove("key1".ptr, 4);
+        wal.close();
+
+        auto wal2 = new Wal(dbPath);
+        int putCount = 0;
+        int removeCount = 0;
+
+        wal2.replay(
+            (const(void)* key, uint keyLen, const(void)* value, uint valLen) {
+                putCount++;
+                return true;
+            },
+            (const(void)* key, uint keyLen) {
+                removeCount++;
+                return true;
+            }
+        );
+
+        assert(putCount == 2);
+        assert(removeCount == 1);
+
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+    }
+
+    writeln("[unittest] Wal checkpoint");
+    {
+        string dbPath = "test_wal_checkpoint.tmp";
+        string walPath = dbPath ~ ".wal";
+        string oldPath = walPath ~ ".old";
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+        if (exists(oldPath)) try { remove(oldPath); } catch (Exception) {}
+
+        auto wal = new Wal(dbPath);
+        wal.open();
+        wal.logPut("key1".ptr, 4, "val1".ptr, 4);
+        assert(wal.checkpoint());
+
+        wal.close();
+
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+        if (exists(oldPath)) try { remove(oldPath); } catch (Exception) {}
+    }
+
+    writeln("[unittest] Wal clear");
+    {
+        string dbPath = "test_wal_clear.tmp";
+        string walPath = dbPath ~ ".wal";
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+
+        auto wal = new Wal(dbPath);
+        wal.open();
+        wal.logPut("key1".ptr, 4, "val1".ptr, 4);
+        wal.close();
+
+        assert(exists(walPath));
+        wal.clear();
+        assert(!exists(walPath));
+    }
+
+    writeln("[unittest] Wal exists");
+    {
+        string dbPath = "test_wal_exists.tmp";
+        string walPath = dbPath ~ ".wal";
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+
+        auto wal = new Wal(dbPath);
+        assert(!wal.exists());
+
+        wal.open();
+        wal.logPut("k".ptr, 1, "v".ptr, 1);
+        wal.close();
+
+        assert(wal.exists());
+
+        if (exists(walPath)) try { remove(walPath); } catch (Exception) {}
+    }
+}

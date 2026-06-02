@@ -8,12 +8,12 @@ module dunqlite.oop.types;
 import dunqlite.oop.allocator;
 
 /**
- * HashFunction - 哈希函数工具类
+ * HashFunction - 哈希函数工具
  * 
  * 提供字符串和二进制数据的哈希计算
  * 使用djb2算法（简单高效）
  */
-final class HashFunction {
+struct HashFunction {
     /**
      * 计算哈希值
      * 
@@ -70,4 +70,51 @@ struct HashNode {
     HashNode* prev;       /// 双向链表前一个节点
     HashNode* nextHash;   /// 哈希桶中的下一个节点
     uint allocSize;       /// 分配的总大小（用于正确释放）
+}
+
+unittest {
+    import std.stdio;
+
+    writeln("[unittest] HashFunction.compute");
+    {
+        auto h1 = HashFunction.compute("hello".ptr, 5);
+        auto h2 = HashFunction.compute("hello".ptr, 5);
+        assert(h1 == h2);
+
+        auto h3 = HashFunction.compute("world".ptr, 5);
+        assert(h1 != h3);
+
+        auto h4 = HashFunction.compute("hello".ptr, 3);
+        assert(h1 != h4);
+
+        auto h5 = HashFunction.compute(null, 0);
+        assert(h5 == 5381);
+    }
+
+    writeln("[unittest] KvEntry.free");
+    {
+        auto alloc = GlobalAllocator.instance();
+        KvEntry entry;
+        entry.key = "testkey".ptr;
+        entry.keyLength = 7;
+        entry.data = alloc.duplicate(cast(const(void)[])"testvalue");
+        entry.hash = 0;
+
+        assert(entry.data.length > 0);
+        entry.free(alloc);
+        assert(entry.data.length == 0);
+
+        entry.free(alloc);
+    }
+
+    writeln("[unittest] HashNode 结构");
+    {
+        HashNode node;
+        assert(node.next is null);
+        assert(node.prev is null);
+        assert(node.nextHash is null);
+        assert(node.allocSize == 0);
+        assert(node.entry.key is null);
+        assert(node.entry.data.length == 0);
+    }
 }

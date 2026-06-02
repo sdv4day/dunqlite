@@ -1,10 +1,19 @@
 {
-	"authors": ["sdv"],
-	"license": "BSL-1.0",
-	"copyright": "Copyright © 2026, sdv",
+    "authors": ["sdv"],
+    "license": "BSL-1.0",
+    "copyright": "Copyright © 2026, sdv",
     "name": "dunqlite",
     "targetType": "library",
+    "targetPath": "bin",
     "description": "DunQLite is a D language UnQLite library",
+    "dependencies": {
+        "silly": "~>1.0.0"
+    },
+    "buildTypes": {
+        "release": {
+            "buildOptions": ["optimize", "inline"]
+        }
+    },
     "configurations": [
         {
             "name": "library",
