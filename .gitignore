@@ -5,3 +5,4 @@ obj/
 .arts/
 .codeartsdoer/
 *.exe
+*.lib

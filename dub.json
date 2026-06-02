@@ -1,6 +1,20 @@
 {
+	"authors": ["sdv"],
+	"license": "BSL-1.0",
+	"copyright": "Copyright © 2026, sdv",
     "name": "dunqlite",
+    "targetType": "library",
+    "description": "DunQLite is a D language UnQLite library",
     "configurations": [
+        {
+            "name": "library",
+            "targetType": "staticLibrary",
+            "excludedSourceFiles": [
+                "source/app.d",
+                "source/app_generic.d",
+                "source/benchmark.d"
+            ]
+        },
         {
             "name": "demo1",
             "targetType": "executable",
